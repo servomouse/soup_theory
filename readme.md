@@ -1,0 +1,1 @@
+The Soup Theory is an idea that neourons are not the only important part of the brain: the fluid they're submerged into also plays an important role. This project is an attempt of implementing an evolving and self-developing neural network by emulating its interaction with the surrounding solution.
