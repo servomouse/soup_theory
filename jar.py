@@ -1,17 +1,19 @@
 import numpy as np
+import json
 
 
 class Jar:
-
-    def __init__(self, size: int = 1024, num_morphogenes: int = 256, threshold: float = 1e-4,):
-        self.size = size
-        self.num_morphogenes = num_morphogenes
-        self.threshold = threshold
+    def __init__(self, jar_config):
+        self.size = jar_config["size"]
+        self.num_morphogenes = jar_config["num_morphogenes"]
+        self.threshold = 0.001
         self.current_tick = 0
 
-        self.diffusion_speeds = np.random.uniform(1.0, 10.0, size=num_morphogenes)
-        self.decay_rates = np.random.uniform(0.01, 0.1, size=num_morphogenes)
-        self.releases = {i: [] for i in range(num_morphogenes)}
+        with open(jar_config["rates_file"]) as f:
+            rates_data = json.loads(f.read())
+        self.diffusion_speeds = np.array(rates_data["diffusion_rates"], dtype=float)
+        self.decay_rates      = np.array(rates_data["decay_rates"], dtype=float)
+        self.releases = {i: [] for i in range(self.num_morphogenes)}
 
     def add_morphogene(self,cell_coords: tuple[int, int, int], morph_id: int, amount: float,) -> None:
         x, y, z = cell_coords
@@ -109,3 +111,10 @@ class Jar:
         res[max_idx] = 1 if grad_vec[max_idx] >= 0 else -1
 
         return tuple(res)
+
+if __name__ == "__main__":
+    j = Jar({
+        "size": 256,
+        "num_morphogenes": 32,
+        "rates_file": "rates.json"
+    })
