@@ -1,120 +1,167 @@
 import numpy as np
 import json
+import math
 
+CELL_RADIUS = 0.5
 
 class Jar:
     def __init__(self, jar_config):
-        self.size = jar_config["size"]
+        self.cube_size = jar_config["size"]
         self.num_morphogenes = jar_config["num_morphogenes"]
         self.threshold = 0.001
         self.current_tick = 0
 
         with open(jar_config["rates_file"]) as f:
             rates_data = json.loads(f.read())
-        self.diffusion_speeds = np.array(rates_data["diffusion_rates"], dtype=float)
-        self.decay_rates      = np.array(rates_data["decay_rates"], dtype=float)
-        self.releases = {i: [] for i in range(self.num_morphogenes)}
 
-    def add_morphogene(self,cell_coords: tuple[int, int, int], morph_id: int, amount: float,) -> None:
+        self.morphogenes = [
+            {
+                "releases": [],
+                "diffusion_rate": rates_data["diffusion_rates"][i],
+                "decay_rate": rates_data["decay_rates"][i]
+            } for i in range(self.num_morphogenes)
+        ]
+
+    def add_morphogene(self, cell_coords, morph_idx, amount) -> None:
         x, y, z = cell_coords
-        self.releases[morph_id].append({
-            "pos": np.array([x, y, z], dtype=np.float64),
-            "amount": float(amount),
-            "release_tick": self.current_tick,
-        })
+        self.morphogenes[morph_idx]["releases"].append({"amount": amount, "coords": [x, y, z], "ticks": 0})
 
     def tick(self) -> None:
-        self.current_tick += 1
-        for morph_id in range(self.num_morphogenes):
-            decay = self.decay_rates[morph_id]
-            active_sources = []
-            for source in self.releases[morph_id]:
-                source["amount"] *= 1.0 - decay
-                if source["amount"] >= self.threshold:
-                    active_sources.append(source)
-            self.releases[morph_id] = active_sources
+        for morph in self.morphogenes:
+            self.update_sources(morph)
 
-    def get_gradient(self, cell_coords: tuple[int, int, int], morph_id: int) -> tuple[int, int, int]:
-        sources = self.releases[morph_id]
-        if not sources:
-            return (1, 1, 1)
+    def get_total_concentration(self, cell_coords, morph_idx):
+        x, y, z = cell_coords
+        if not (0 <= x <= self.cube_size and 0 <= y <= self.cube_size and 0 <= z <= self.cube_size):
+            return 0.0
 
-        target = np.array(cell_coords, dtype=np.float64)
-        D = self.diffusion_speeds[morph_id]
+        total_concentration = 0.0
+        morph = self.morphogenes[morph_idx]
 
-        positions = np.array([s["pos"] for s in sources])
-        amounts = np.array([s["amount"] for s in sources])
-        release_ticks = np.array([s["release_tick"] for s in sources])
+        for source in morph["releases"]:
+            amount = source["amount"]
+            source_coords = source["coords"]
+            ticks = source["ticks"]
 
-        dt = np.maximum(1, self.current_tick - release_ticks + 1)
-        diff = target - positions
-        r2 = np.sum(diff**2, axis=1)
+            # Step 1: Distance and expansion boundary check
+            distance = math.dist(source_coords, cell_coords)
+            plume_radius = CELL_RADIUS + (morph["diffusion_rate"] * ticks)
 
-        norm_factor = (4.0 * np.pi * D * dt) ** 1.5
-        conc_i = (amounts / norm_factor) * np.exp(-r2 / (4.0 * D * dt))
-        total_conc = np.sum(conc_i)
+            if distance > plume_radius:
+                continue  # Target is outside the sphere
 
-        if total_conc < self.threshold:
-            return (1, 1, 1)
+            # Step 2: Calculate uniform concentration (Amount / Sphere Volume)
+            volume = (4.0 / 3.0) * math.pi * (plume_radius ** 3)
+            base_concentration = amount / volume
 
-        grad_components = conc_i[:, np.newaxis] * (
-            -diff / (2.0 * D * dt[:, np.newaxis])
-        )
-        grad_vec = np.sum(grad_components, axis=0)
+            # Step 3: Apply per-tick decay
+            decay_factor = (1.0 - morph["decay_rate"]) ** ticks
+            concentration = base_concentration * decay_factor
 
-        gx = 1 if grad_vec[0] >= 0 else -1
-        gy = 1 if grad_vec[1] >= 0 else -1
-        gz = 1 if grad_vec[2] >= 0 else -1
+            # Step 4: Accumulate if above threshold
+            if concentration >= self.threshold:
+                total_concentration += concentration
 
-        return (gx, gy, gz)
+        return total_concentration
 
-    def get_max_gradient(self, cell_coords: tuple[int, int, int], morph_id: int) -> tuple[int, int, int]:
-        """Calculates the dominant gradient axis at the cell coordinates.
+    def update_sources(self, morph):
+        active_sources = []
 
-        Returns a vector with a single non-zero entry (1 or -1) along the axis
-        with the highest absolute gradient magnitude. Default: (0, 1, 0).
-        """
-        sources = self.releases[morph_id]
-        if not sources:
-            return (0, 1, 0)
+        for source in morph["releases"]:
+            # Step 1: Increment simulation tick
+            source["ticks"] += 1
 
-        target = np.array(cell_coords, dtype=np.float64)
-        D = self.diffusion_speeds[morph_id]
+            # Step 2: Calculate expanded plume volume
+            plume_radius = CELL_RADIUS + (morph["diffusion_rate"] * source["ticks"])
+            volume = (4.0 / 3.0) * math.pi * (plume_radius ** 3)
 
-        positions = np.array([s["pos"] for s in sources])
-        amounts = np.array([s["amount"] for s in sources])
-        release_ticks = np.array([s["release_tick"] for s in sources])
+            # Step 3: Calculate current uniform concentration inside the sphere
+            base_concentration = source["amount"] / volume
+            decay_factor = (1.0 - morph["decay_rate"]) ** source["ticks"]
+            current_concentration = base_concentration * decay_factor
 
-        dt = np.maximum(1, self.current_tick - release_ticks + 1)
-        diff = target - positions
-        r2 = np.sum(diff**2, axis=1)
+            # Step 4: Keep only sources that still meet the threshold
+            if current_concentration >= self.threshold:
+                active_sources.append(source)
 
-        norm_factor = (4.0 * np.pi * D * dt) ** 1.5
-        conc_i = (amounts / norm_factor) * np.exp(-r2 / (4.0 * D * dt))
-        total_conc = np.sum(conc_i)
+        # Modify the original list in-place safely
+        morph["releases"][:] = active_sources
 
-        # Fallback to default if total concentration is below threshold
-        if total_conc < self.threshold:
-            return (0, 1, 0)
+    def get_default_direction(self, target_coords):
+        """Calculates fallback direction pointing toward the center along the most displaced axis."""
+        center = self.cube_size / 2.0
+        x, y, z = target_coords
 
-        grad_components = conc_i[:, np.newaxis] * (-diff / (2.0 * D * dt[:, np.newaxis]))
-        grad_vec = np.sum(grad_components, axis=0)
+        offsets = [center - x, center - y, center - z]
+        abs_offsets = [abs(o) for o in offsets]
+        max_distance = max(abs_offsets)
 
-        abs_grads = np.abs(grad_vec)
-        max_idx = int(np.argmax(abs_grads))
+        # If target is at the exact center, return [0, 1, 0]
+        if max_distance == 0:
+            return [0, 1, 0]
 
-        # Fallback if all gradient components evaluate to zero
-        if abs_grads[max_idx] == 0:
-            return (0, 1, 0)
+        # Find the axis farthest from center and build a unit vector toward center
+        for i, offset in enumerate(offsets):
+            if abs(offset) == max_distance:
+                direction = [0, 0, 0]
+                direction[i] = 1 if offset > 0 else -1
+                return direction
 
-        res = [0, 0, 0]
-        res[max_idx] = 1 if grad_vec[max_idx] >= 0 else -1
+        return [0, 1, 0]
 
-        return tuple(res)
+    def get_gradient(self, cell_coords, morph_idx):
+        default_direction = self.get_default_direction(cell_coords)
+
+        try:
+            x, y, z = cell_coords
+
+            # Step 1: Get concentration at the 6 neighboring face cells
+            c_px = self.get_total_concentration([x + 1, y, z], morph_idx)
+            c_nx = self.get_total_concentration([x - 1, y, z], morph_idx)
+
+            c_py = self.get_total_concentration([x, y + 1, z], morph_idx)
+            c_ny = self.get_total_concentration([x, y - 1, z], morph_idx)
+
+            c_pz = self.get_total_concentration([x, y, z + 1], morph_idx)
+            c_nz = self.get_total_concentration([x, y, z - 1], morph_idx)
+
+            # Step 2: Compute change along each axis
+            grad_x = c_px - c_nx
+            grad_y = c_py - c_ny
+            grad_z = c_pz - c_nz
+
+            # Step 3: Pair gradient magnitudes with their 1D direction vectors
+            axis_gradients = [
+                (abs(grad_x), [1 if grad_x > 0 else -1, 0, 0]),
+                (abs(grad_y), [0, 1 if grad_y > 0 else -1, 0]),
+                (abs(grad_z), [0, 0, 1 if grad_z > 0 else -1]),
+            ]
+
+            # Step 4: Find the axis with the largest gradient magnitude
+            max_magnitude, max_direction = max(axis_gradients, key=lambda item: item[0])
+
+            # Step 5: Return direction if steep enough, otherwise default
+            if max_magnitude >= self.threshold:
+                return max_direction
+            return default_direction
+
+        except Exception:
+            # Fallback if target/neighbors cannot be calculated
+            return default_direction
+
 
 if __name__ == "__main__":
     j = Jar({
         "size": 256,
         "num_morphogenes": 32,
-        "rates_file": "rates.json"
+        "rates_file": "rates_test.json"
     })
+    j.add_morphogene([10, 10, 10], 3, 128)
+    for i in range(100):
+        print(f"Concentration at step {i}: {j.get_total_concentration([10, 10, 10], 3):.3f}", end="")
+        print(f" {j.get_total_concentration([11, 10, 10], 3):.3f}", end="")
+        print(f" {j.get_total_concentration([12, 10, 10], 3):.3f}", end="")
+        print(f" {j.get_total_concentration([13, 10, 10], 3):.3f}", end="")
+        print(f" {j.get_total_concentration([14, 10, 10], 3):.3f}", end="")
+        print(f" {j.get_total_concentration([15, 10, 10], 3):.3f}")
+        j.tick()
